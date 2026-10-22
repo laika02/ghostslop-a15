@@ -7,7 +7,7 @@ kernel `5.15.189-android13-8-33641424`, firmware `A156USQSCEZG1`.
 The repository tracks source and reviewable documentation. It intentionally
 does not track compiled binaries, device dumps, experimental run logs, or
 retry scripts. The active one-shot launcher is
-[`scripts/termux-trigger.sh`](scripts/termux-trigger.sh).
+[`scripts/adb-trigger.sh`](scripts/adb-trigger.sh).
 
 ## Verified result
 
@@ -37,55 +37,43 @@ d4dcc86234d9d8b65f910e31c999bdc6ffad9a8d913705cced522e5c986a7831
 The launcher rejects any binary whose hash differs. Build outputs are ignored
 by Git.
 
-## Termux launcher
+## Trigger over ADB
 
-The exploit must be invoked in an ADB shell (`uid=2000`, context
-`u:r:shell:s0`). Running the exploit or `g4sh` directly as the Termux app
-does not provide that identity. The existing `g4d`/`g4sh` helpers must be
-present and executable at `/data/local/tmp/a/` on the phone.
-
-First ensure Termux's `adb` works and lists the phone as an online `device`:
+Connect the A15 to the computer and confirm ADB lists it as an online
+`device`:
 
 ```sh
 adb devices -l
 ```
 
-For a Termux-on-the-phone setup, Wireless debugging must be paired and
-connected to Termux's ADB client. If Termux ADB cannot connect to itself, run
-the launcher from a paired computer instead. ADB must work before the
-launcher starts; the current Termux install previously reported a missing
-`_ZNSt6__ndk113__hash_memoryEPKvm` symbol from `$PREFIX/bin/adb`, so that
-package/runtime mismatch needs to be fixed first. Read-only diagnostics are:
+From this repository, run the launcher with the tested binary:
+
+```sh
+./scripts/adb-trigger.sh ./ghostlock-a15
+```
+
+With multiple devices connected, set `ADB_SERIAL` to the A15's serial. The
+script also accepts the binary path as its first argument or through
+`GHOSTLOCK_BIN`.
+
+The launcher checks the model, kernel, clean boot state, SELinux mode, ADB
+shell identity, helper files, and local/staged binary hashes. It asks you to
+type `TRIGGER`, records one attempt for that boot ID on the computer, stages a
+temporary executable under `/data/local/tmp`, and checks the result with
+`g4sh`. It never retries or reboots. A kernel panic is still possible; if a
+panic cuts off ADB, best-effort cleanup of the staged file may not complete.
+
+The same script can run in Termux if its ADB client is working and can see the
+phone. `scripts/termux-trigger.sh` is a compatibility symlink. The current
+Termux install reported a missing `_ZNSt6__ndk113__hash_memoryEPKvm` symbol
+from `$PREFIX/bin/adb`; that runtime/package mismatch must be repaired first.
+Read-only diagnostics are:
 
 ```sh
 type -a adb
 dpkg -s android-tools libc++ | grep -E '^(Package|Version|Status):'
 termux-info
 ```
-
-After repairing the Termux package set, verify `adb version` and
-`adb devices -l` before using the launcher.
-
-To copy the launcher and matching binary from a connected computer into
-Downloads:
-
-```sh
-adb push scripts/termux-trigger.sh /sdcard/Download/termux-trigger.sh
-adb push ghostlock-a15 /sdcard/Download/ghostlock-a15
-```
-
-In Termux, enable shared storage if needed, then run:
-
-```sh
-termux-setup-storage
-bash ~/storage/downloads/termux-trigger.sh ~/storage/downloads/ghostlock-a15
-```
-
-The launcher checks the model, kernel, clean boot state, SELinux mode, ADB
-shell identity, helper files, and both local and staged binary hashes. It
-asks you to type `TRIGGER`, records one attempt for that boot ID, and checks
-the resulting session with `g4sh`. It does not retry or reboot. A kernel panic
-is still possible.
 
 ## Verify a live root session
 

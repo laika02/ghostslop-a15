@@ -9,6 +9,7 @@
 !/src/**
 !/scripts/
 /scripts/*
+!/scripts/adb-trigger.sh
 !/scripts/termux-trigger.sh
 !/docs/
 /docs/*
