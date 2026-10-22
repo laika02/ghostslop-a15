@@ -1,0 +1,33 @@
+# Default-deny this mixed research workspace: only the A15 source, launcher,
+# license, build file, README, and one-boot result record are tracked.
+/*
+!/.gitignore
+!/LICENSE
+!/Makefile
+!/README.md
+!/src/
+!/src/**
+!/scripts/
+/scripts/*
+!/scripts/termux-trigger.sh
+!/docs/
+/docs/*
+!/docs/A15-ONE-BOOT-RESULT.md
+
+# Generated build products and local captures are never source.
+*.o
+*.a
+*.so
+*.d
+*.log
+*.raw
+*.raw.gz
+*.zip
+*.img
+*.elf
+*.dtb
+*.dtbo
+*.ko
+*.pid
+*.core
+.DS_Store
