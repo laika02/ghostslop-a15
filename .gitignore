@@ -11,9 +11,15 @@
 /scripts/*
 !/scripts/adb-trigger.sh
 !/scripts/termux-trigger.sh
+!/scripts/defex-exec.sh
+!/scripts/g4run.sh
+!/scripts/g4run-fish-init.fish
+!/scripts/g4run-init.sh
 !/docs/
 /docs/*
 !/docs/A15-ONE-BOOT-RESULT.md
+!/docs/DEFEX-SAFEPLACE.md
+!/docs/G4SH-PTY.md
 
 # Generated build products and local captures are never source.
 *.o

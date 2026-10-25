@@ -24,7 +24,7 @@ LDFLAGS := -fPIE -pie -pthread
 
 .PHONY: all clean czg1 a15
 
-all: ghostlock g4d g4sh
+all: ghostlock g4d g4sh g4exec
 
 ghostlock: $(SRCS) src/core/$(TARGET)
 	$(NDK_CC) $(CFLAGS) $(LDFLAGS) $(SRCS) -o $@
@@ -51,11 +51,14 @@ STATIC ?=
 else
 STATIC ?= -static
 endif
-g4d: src/daemon/g4d.c
+g4d: src/daemon/g4d.c src/daemon/g4d_protocol.h
 	$(NDK_CC) -O2 -Wall $(STATIC) src/daemon/g4d.c -o $@
 
-g4sh: src/daemon/g4sh.c
+g4sh: src/daemon/g4sh.c src/daemon/g4d_protocol.h
 	$(NDK_CC) -O2 -Wall $(STATIC) src/daemon/g4sh.c -o $@
 
+g4exec: src/daemon/g4exec.c
+	$(NDK_CC) -O2 -Wall $(STATIC) src/daemon/g4exec.c -o $@
+
 clean:
-	rm -f ghostlock g4d g4sh
+	rm -f ghostlock g4d g4sh g4exec

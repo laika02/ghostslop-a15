@@ -6,7 +6,7 @@ set -euo pipefail
 
 readonly EXPECTED_MODEL='SM-A156U'
 readonly EXPECTED_KERNEL='5.15.189-android13-8-33641424'
-readonly EXPECTED_BINARY_SHA256='d4dcc86234d9d8b65f910e31c999bdc6ffad9a8d913705cced522e5c986a7831'
+readonly EXPECTED_BINARY_SHA256='392b205b05c6eda39f4ecc401109859a38b7d585ff90912e85fdf5861a8a0617'
 readonly REMOTE_DIR='/data/local/tmp/ghostlock-a15-session'
 readonly REMOTE_BIN="$REMOTE_DIR/e"
 readonly G4SH='/data/local/tmp/a/g4sh'
@@ -14,15 +14,15 @@ readonly G4D='/data/local/tmp/a/g4d'
 
 usage() {
   cat <<'EOF'
-Usage: adb-trigger.sh [path-to-tested-ghostlock-a15-binary]
+Usage: adb-trigger.sh [path-to-candidate-ghostlock-a15-binary]
 
 Requires adb to already list the Galaxy A15 as an online device. Set
 ADB_SERIAL if more than one device is online. Set GHOSTLOCK_BIN instead of
 passing the binary path if preferred.
 
-The binary must match the known successful build SHA-256. This performs one
-kernel exploit attempt, can panic/reboot the phone, and will not retry on the
-same boot. It never reboots the phone itself.
+The binary must match the pinned candidate SHA-256. This performs one kernel
+exploit attempt, can panic/reboot the phone, and will not retry on the same
+boot. It never reboots the phone itself.
 EOF
 }
 
@@ -77,6 +77,29 @@ remote() {
   "$ADB" -s "$SERIAL" shell "$1"
 }
 
+print_g4sh_command() {
+  printf 'To verify root later this boot, run:\n'
+  printf "  adb -s '%s' shell '%s -c \"id\"'\n" "$SERIAL" "$G4SH"
+}
+
+print_fish_command() {
+  printf 'To open an interactive root shell later this boot, run:\n'
+  printf "  adb -s '%s' shell -t 'TERM=xterm-256color TERMINFO=/data/data/com.termux/files/usr/share/terminfo %s'\n" \
+    "$SERIAL" "$G4SH"
+  printf 'At the g4sh prompt, start fish with:\n'
+  printf '  . /data/local/tmp/a/g4run-init.sh\n'
+  printf '  g4run fish\n'
+}
+
+g4sh_root_uid() {
+  local response
+  response="$(remote "$G4SH -c 'id -u'" 2>/dev/null || true)"
+  printf '%s\n' "$response" | tr -d '\r' | awk '
+    /^[[:space:]]*0[[:space:]]*$/ { found = 1 }
+    END { if (found) print "0" }
+  '
+}
+
 STAGED=0
 cleanup_remote_stage() {
   if [[ "$STAGED" == '1' ]]; then
@@ -106,10 +129,12 @@ if [[ "$BOOT_COMPLETE" != '1' || "$ENFORCING" != 'Enforcing' || \
   exit 1
 fi
 
-ROOT_UID="$(remote "$G4SH -c 'id -u'" 2>/dev/null | tr -d '\r' || true)"
+ROOT_UID="$(g4sh_root_uid)"
 if [[ "$ROOT_UID" == '0' ]]; then
   printf 'This boot already has the root session. Refusing to trigger again.\n'
   remote "$G4SH -c 'id'" || true
+  print_g4sh_command
+  print_fish_command
   exit 0
 fi
 if ! remote "test -x '$G4SH' && test -x '$G4D'" >/dev/null 2>&1; then
@@ -137,12 +162,29 @@ if [[ "$CONFIRM" != 'TRIGGER' ]]; then
   exit 0
 fi
 
+STALE_STAGE=0
 if remote "test -e '$REMOTE_BIN'" >/dev/null 2>&1; then
-  printf 'Refusing to overwrite an existing staged file: %s\n' "$REMOTE_BIN" >&2
-  exit 1
+  REMOTE_STAGED_HASH="$(remote "sha256sum '$REMOTE_BIN' 2>/dev/null" | awk '{print $1}' | tr -d '\r' || true)"
+  if [[ "$REMOTE_STAGED_HASH" != "$EXPECTED_BINARY_SHA256" ]]; then
+    printf 'Refusing to remove an unexpected staged file: %s\n' "$REMOTE_BIN" >&2
+    printf 'Expected hash %s; found %s\n' \
+      "$EXPECTED_BINARY_SHA256" "${REMOTE_STAGED_HASH:-<unreadable>}" >&2
+    exit 1
+  fi
+  STALE_STAGE=1
 fi
+
 STAGED=1
 trap cleanup_remote_stage EXIT
+if [[ "$STALE_STAGE" == '1' ]]; then
+  printf 'Removing stale staged candidate from this unattempted boot: %s\n' \
+    "$REMOTE_BIN"
+  remote "rm -f '$REMOTE_BIN'"
+  if remote "test -e '$REMOTE_BIN'" >/dev/null 2>&1; then
+    printf 'Could not remove the stale staged candidate; refusing to continue.\n' >&2
+    exit 1
+  fi
+fi
 remote "mkdir -p '$REMOTE_DIR'"
 "$ADB" -s "$SERIAL" push "$BIN" "$REMOTE_BIN"
 remote "chmod 0755 '$REMOTE_BIN'"
@@ -173,10 +215,12 @@ RUN_STATUS=$?
 set -e
 
 printf '\nChecking the root session through g4sh...\n'
-ROOT_UID="$(remote "$G4SH -c 'id -u'" 2>/dev/null | tr -d '\r' || true)"
+ROOT_UID="$(g4sh_root_uid)"
 if [[ "$ROOT_UID" == '0' ]]; then
   remote "$G4SH -c 'id'"
   printf 'One-boot root session verified.\n'
+  print_g4sh_command
+  print_fish_command
   exit 0
 fi
 
