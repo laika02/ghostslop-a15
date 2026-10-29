@@ -144,6 +144,7 @@ class MainActivity : Activity() {
     private lateinit var stageExploitButton: Button
     private lateinit var triggerExploitButton: Button
     private lateinit var cleanStagedButton: Button
+    private lateinit var reconnectStatusButton: Button
     private lateinit var exploitStageStatus: TextView
     private lateinit var prepareManagerButton: Button
     private lateinit var managerPreparedStatus: TextView
@@ -206,6 +207,10 @@ class MainActivity : Activity() {
             setBackgroundColor(0xff5f6368.toInt())
         }
         column.addView(statusBanner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        reconnectStatusButton = addButton(column, "RECONNECT & CHECK STATUS") {
+            connectPortInput.text.clear()
+            refreshExploitStatus()
+        }.also { it.visibility = ViewGroup.GONE }
 
         val tabStrip = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -440,6 +445,9 @@ class MainActivity : Activity() {
         if (value) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         actionButtons.forEach { it.isEnabled = !value }
+        if (::reconnectStatusButton.isInitialized) {
+            reconnectStatusButton.isEnabled = !value && !statusCheckRunning
+        }
     }
 
     private fun refreshExploitStatus() {
@@ -453,6 +461,11 @@ class MainActivity : Activity() {
         }
         statusCheckRunning = true
         statusBanner.text = "Checking exploit status…"
+        if (::reconnectStatusButton.isInitialized &&
+            reconnectStatusButton.visibility == ViewGroup.VISIBLE) {
+            reconnectStatusButton.text = "CONNECTING…"
+            reconnectStatusButton.isEnabled = false
+        }
         val inputs = currentInputs()
         scope.launch {
             try {
@@ -529,12 +542,22 @@ class MainActivity : Activity() {
                 setExploitStatus(null)
             } finally {
                 statusCheckRunning = false
+                if (::reconnectStatusButton.isInitialized) {
+                    reconnectStatusButton.text = "RECONNECT & CHECK STATUS"
+                    reconnectStatusButton.isEnabled = !busy
+                }
             }
         }
     }
 
     private fun setExploitStatus(active: Boolean?) {
         if (!::statusBanner.isInitialized) return
+        if (::reconnectStatusButton.isInitialized) {
+            val pairingSaved = getSharedPreferences("adb-pairing", MODE_PRIVATE)
+                .getString("device_guid", null).isNullOrBlank().not()
+            reconnectStatusButton.visibility =
+                if (active == null && pairingSaved) ViewGroup.VISIBLE else ViewGroup.GONE
+        }
         when (active) {
             true -> {
                 statusBanner.text = "EXPLOIT ACTIVE"
