@@ -99,7 +99,9 @@ The manager is volatile. The UID grant list lives in `/dev` tmpfs, and the
 namespaces. Reboot clears the daemon, grants, and overlay. Wireless Debugging
 pairing credentials are stored in the app's private data so the app can try to
 reconnect; Android may still require pairing again if that pairing is revoked
-or unavailable.
+or unavailable. If a saved pairing exists but root status is unknown, GhostSlop
+rechecks every five seconds while it is open and stops once status is known. It
+pauses those retries when the app is in the background.
 
 The app's allowlist is by Linux UID. Packages sharing a UID share a grant.
 Selecting an app does not show a separate approval dialog in that app: access

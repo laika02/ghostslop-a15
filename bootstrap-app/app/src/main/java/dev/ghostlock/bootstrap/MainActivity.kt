@@ -28,8 +28,11 @@ import io.github.rhythmcache.adb.pairing.buildPairingIdentity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -128,6 +131,7 @@ private data class AppUidGroup(val uid: Int, val title: String)
 
 class MainActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var statusPollJob: Job? = null
     private lateinit var pairPortInput: EditText
     private lateinit var pairingCodeInput: EditText
     private lateinit var connectPortInput: EditText
@@ -154,6 +158,7 @@ class MainActivity : Activity() {
     private val actionButtons = mutableListOf<Button>()
     private var busy = false
     private var statusCheckRunning = false
+    private var exploitStatusUnknown = true
     private var exploitPayloadStaged = false
     private var stagedFilesExist = false
     private var lastAutoPairAttempt: String? = null
@@ -169,7 +174,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        startStatusPolling()
         refreshExploitStatus()
+    }
+
+    override fun onPause() {
+        statusPollJob?.cancel()
+        statusPollJob = null
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -551,6 +563,7 @@ class MainActivity : Activity() {
     }
 
     private fun setExploitStatus(active: Boolean?) {
+        exploitStatusUnknown = active == null
         if (!::statusBanner.isInitialized) return
         if (::reconnectStatusButton.isInitialized) {
             val pairingSaved = getSharedPreferences("adb-pairing", MODE_PRIVATE)
@@ -594,6 +607,23 @@ class MainActivity : Activity() {
             null -> {
                 statusBanner.text = "ROOT STATUS UNKNOWN"
                 statusBanner.setBackgroundColor(0xff5f6368.toInt())
+            }
+        }
+    }
+
+    private fun startStatusPolling() {
+        statusPollJob?.cancel()
+        statusPollJob = scope.launch {
+            while (isActive) {
+                while (isActive && statusCheckRunning) delay(250L)
+                if (!isActive || !exploitStatusUnknown) break
+                val pairingSaved = getSharedPreferences("adb-pairing", MODE_PRIVATE)
+                    .getString("device_guid", null).isNullOrBlank().not()
+                if (exploitStatusUnknown && pairingSaved && !busy && !statusCheckRunning) {
+                    refreshExploitStatus()
+                    while (isActive && statusCheckRunning) delay(250L)
+                }
+                if (exploitStatusUnknown) delay(5_000L)
             }
         }
     }

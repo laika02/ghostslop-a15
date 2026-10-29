@@ -59,7 +59,9 @@ debug key and is not a Play Store release.
 4. After pairing, the setup fields disappear. GhostSlop saves its ADB key and
    device identity in private app storage. If pairing is revoked or no longer
    works, open the pairing screen again and pair again. The optional connect
-   port override is for networks where discovery does not find the service.
+   port override is for networks where discovery does not find the service. If
+   the saved pairing is present but root status is unknown, GhostSlop retries
+   the connection check every five seconds while the app is open.
 
 ## Start a root session
 
