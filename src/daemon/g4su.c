@@ -109,9 +109,29 @@ static int send_command(int fd, const char *command, uint16_t flags,
           write_all(fd, environment, environment_length));
 }
 
-static char *pack_environment(uint32_t *length_out) {
+static int is_android_runtime_variable(const char *entry) {
+  static const char *const names[] = {
+    "ANDROID_ASSETS", "ANDROID_ROOT", "ANDROID_DATA", "ANDROID_STORAGE",
+    "ANDROID_ART_ROOT", "ANDROID_I18N_ROOT", "ANDROID_TZDATA_ROOT",
+    "BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "SYSTEMSERVERCLASSPATH",
+  };
+  const char *equals = strchr(entry, '=');
+  if (!equals)
+    return 0;
+  size_t name_length = (size_t)(equals - entry);
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    if (strlen(names[i]) == name_length &&
+        memcmp(entry, names[i], name_length) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+static char *pack_environment(uint32_t *length_out, int preserve_all) {
   size_t total = 0;
   for (char **entry = environ; entry && *entry; entry++) {
+    if (!preserve_all && !is_android_runtime_variable(*entry))
+      continue;
     size_t length = strlen(*entry) + 1;
     if (length > G4D_SU_MAX_ENV - total) {
       fprintf(stderr, "g4su: environment exceeds %u bytes\n", G4D_SU_MAX_ENV);
@@ -124,6 +144,8 @@ static char *pack_environment(uint32_t *length_out) {
     return NULL;
   size_t offset = 0;
   for (char **entry = environ; entry && *entry; entry++) {
+    if (!preserve_all && !is_android_runtime_variable(*entry))
+      continue;
     size_t length = strlen(*entry) + 1;
     memcpy(block + offset, *entry, length);
     offset += length;
@@ -258,11 +280,22 @@ static int make_command(int argc, char **argv, char **command_out,
     return 1;
   }
 
+  /* libsu starts su with pipes and expects a quiet, persistent shell. A PTY
+   * makes Android sh interactive, which adds prompts and command echo that
+   * confuse its one-line root handshake. Keep PTYs for terminal callers. */
+  int no_pty = !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO) ||
+               !isatty(STDERR_FILENO);
+  if (no_pty) {
+    *flags_out |= G4D_SU_FLAG_NO_PTY;
+    /* Framework-backed root services need Binder access. Keep ADB-style app
+     * shells in Android's shell SELinux domain instead of kernel:s0. */
+    *flags_out |= G4D_SU_FLAG_SHELL_CONTEXT;
+  }
   size_t needed = strlen(shell) + 8;
   char *command = malloc(needed);
   if (!command)
     return 0;
-  snprintf(command, needed, "exec %s -i", shell);
+  snprintf(command, needed, no_pty ? "exec %s" : "exec %s -i", shell);
   *command_out = command;
   return 1;
 
@@ -311,6 +344,9 @@ static int run_command(int fd, int interactive) {
       if (frame.type == G4D_MSG_STDOUT) {
         if (!write_all(STDOUT_FILENO, buffer, frame.length))
           break;
+      } else if (frame.type == G4D_MSG_STDERR) {
+        if (!write_all(STDERR_FILENO, buffer, frame.length))
+          break;
       } else if (frame.type == G4D_MSG_EXIT &&
                  frame.length == sizeof(int32_t)) {
         int32_t code;
@@ -356,14 +392,14 @@ int main(int argc, char **argv) {
     return 2;
   int interactive = strstr(command, " -i") != NULL;
   uint32_t environment_length = 0;
-  char *environment = NULL;
-  if (flags & G4D_SU_FLAG_PRESERVE_ENV) {
-    environment = pack_environment(&environment_length);
-    if (!environment) {
-      free(command);
-      return 1;
-    }
+  int preserve_all = (flags & G4D_SU_FLAG_PRESERVE_ENV) != 0;
+  char *environment = pack_environment(&environment_length, preserve_all);
+  if (!environment) {
+    free(command);
+    return 1;
   }
+  if (!preserve_all)
+    flags |= G4D_SU_FLAG_ANDROID_ENV;
   int fd = connect_daemon();
   if (fd < 0) {
     fprintf(stderr, "g4su: root service is unavailable or this app UID has no grant\n");

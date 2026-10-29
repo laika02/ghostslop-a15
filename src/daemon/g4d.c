@@ -178,6 +178,275 @@ static void send_eof_to_pty(int master) {
   (void)write_all(master, &eof, sizeof(eof));
 }
 
+static int enter_peer_mount_namespace(int cfd, pid_t peer_pid) {
+  char ns_path[64];
+  snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/mnt", peer_pid);
+  int nsfd = peer_pid > 0 ? open(ns_path, O_RDONLY | O_CLOEXEC) : -1;
+  if (nsfd < 0 || setns(nsfd, CLONE_NEWNS) != 0) {
+    int32_t result = G4D_SU_ERROR_MOUNT_NS;
+    (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
+    if (nsfd >= 0)
+      close(nsfd);
+    return 0;
+  }
+  close(nsfd);
+  if (chdir("/") != 0) {
+    int32_t result = G4D_SU_ERROR_MOUNT_NS;
+    (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
+    return 0;
+  }
+  return 1;
+}
+
+static void set_su_environment(char *environment, uint32_t environment_length) {
+  setenv("HOME", "/root", 1);
+  setenv("USER", "root", 1);
+  setenv("LOGNAME", "root", 1);
+  setenv("SHELL", G4D_SHELL, 1);
+  setenv("PATH", "/system/bin:/system/xbin:/vendor/bin:/vendor/xbin", 1);
+  for (size_t offset = 0; environment && offset < environment_length;) {
+    char *entry = environment + offset;
+    size_t entry_length = strlen(entry);
+    char *equals = strchr(entry, '=');
+    *equals = '\0';
+    setenv(entry, equals + 1, 1);
+    offset += entry_length + 1;
+  }
+}
+
+static void exec_su_shell(uint16_t flags, const char *command) {
+  char *const shell_argv[] = {
+      (char *)"sh", (char *)"-c", (char *)command, NULL};
+  if (flags & G4D_SU_FLAG_SHELL_CONTEXT) {
+    char *const runcon_argv[] = {
+        (char *)"runcon", (char *)"u:r:shell:s0", (char *)G4D_SHELL,
+        (char *)"-c", (char *)command, NULL};
+    execv("/system/bin/runcon", runcon_argv);
+  }
+  execv(G4D_SHELL, shell_argv);
+}
+
+/* App-launched shells use pipes, matching Runtime.exec/libsu stream behavior.
+ * No PTY means Android sh stays quiet and does not echo the libsu handshake. */
+static void session_su_pipes(int cfd, pid_t peer_pid, uint16_t flags,
+                             char *command, char *environment,
+                             uint32_t environment_length) {
+  if (!(flags & G4D_SU_FLAG_MOUNT_MASTER) &&
+      !enter_peer_mount_namespace(cfd, peer_pid))
+    return;
+
+  int input_pipe[2] = { -1, -1 };
+  int output_pipe[2] = { -1, -1 };
+  int error_pipe[2] = { -1, -1 };
+  if (pipe2(input_pipe, O_CLOEXEC) != 0 ||
+      pipe2(output_pipe, O_CLOEXEC) != 0 ||
+      pipe2(error_pipe, O_CLOEXEC) != 0) {
+    int32_t result = 127;
+    (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
+    goto cleanup;
+  }
+
+  int input_flags = fcntl(input_pipe[1], F_GETFL);
+  if (input_flags < 0 ||
+      fcntl(input_pipe[1], F_SETFL, input_flags | O_NONBLOCK) != 0) {
+    int32_t result = 127;
+    (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
+    goto cleanup;
+  }
+
+  struct sigaction default_chld;
+  memset(&default_chld, 0, sizeof(default_chld));
+  default_chld.sa_handler = SIG_DFL;
+  sigemptyset(&default_chld.sa_mask);
+  sigaction(SIGCHLD, &default_chld, NULL);
+
+  pid_t pid = fork();
+  if (pid == 0) {
+    dup2(input_pipe[0], STDIN_FILENO);
+    dup2(output_pipe[1], STDOUT_FILENO);
+    dup2(error_pipe[1], STDERR_FILENO);
+    close(input_pipe[0]);
+    close(input_pipe[1]);
+    close(output_pipe[0]);
+    close(output_pipe[1]);
+    close(error_pipe[0]);
+    close(error_pipe[1]);
+    close(cfd);
+    set_su_environment(environment, environment_length);
+    signal(SIGPIPE, SIG_DFL);
+    exec_su_shell(flags, command);
+    _exit(127);
+  }
+  close(input_pipe[0]);
+  input_pipe[0] = -1;
+  close(output_pipe[1]);
+  output_pipe[1] = -1;
+  close(error_pipe[1]);
+  error_pipe[1] = -1;
+  if (pid < 0) {
+    int32_t result = 127;
+    (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
+    goto cleanup;
+  }
+
+  int client_open = 1;
+  int input_open = 1;
+  int output_open = 1;
+  int error_open = 1;
+  int child_done = 0;
+  int status = 0;
+  int failed = 0;
+  time_t child_done_at = 0;
+  unsigned char buffer[G4D_MAX_PAYLOAD];
+  unsigned char pending[G4D_MAX_PAYLOAD];
+  size_t pending_length = 0;
+  size_t pending_offset = 0;
+
+  while (output_open || error_open || !child_done) {
+    struct pollfd pf[4] = {
+      { .fd = client_open && input_open && pending_length == 0 ? cfd : -1,
+        .events = POLLIN },
+      { .fd = input_open && pending_offset < pending_length ? input_pipe[1] : -1,
+        .events = POLLOUT },
+      { .fd = output_open ? output_pipe[0] : -1, .events = POLLIN },
+      { .fd = error_open ? error_pipe[0] : -1, .events = POLLIN },
+    };
+    int pr = poll(pf, 4, 100);
+    if (pr < 0 && errno != EINTR) {
+      failed = 1;
+      break;
+    }
+    if (!child_done) {
+      pid_t waited = waitpid(pid, &status, WNOHANG);
+      if (waited == pid) {
+        child_done = 1;
+        child_done_at = time(NULL);
+      }
+    }
+
+    if (client_open && pr > 0 && (pf[0].revents & POLLIN)) {
+      struct g4d_frame frame;
+      if (!recv_frame(cfd, &frame, buffer, sizeof(buffer))) {
+        client_open = 0;
+        if (input_open) {
+          close(input_pipe[1]);
+          input_pipe[1] = -1;
+          input_open = 0;
+        }
+      } else if (frame.type == G4D_MSG_STDIN && frame.length > 0) {
+        memcpy(pending, buffer, frame.length);
+        pending_length = frame.length;
+        pending_offset = 0;
+      } else if (frame.type == G4D_MSG_EOF && frame.length == 0) {
+        close(input_pipe[1]);
+        input_pipe[1] = -1;
+        input_open = 0;
+      } else if (frame.type != G4D_MSG_RESIZE || frame.length != 0) {
+        client_open = 0;
+        if (input_open) {
+          close(input_pipe[1]);
+          input_pipe[1] = -1;
+          input_open = 0;
+        }
+      }
+    }
+    if (client_open && pr > 0 &&
+        (pf[0].revents & (POLLHUP | POLLERR | POLLNVAL))) {
+      client_open = 0;
+      if (input_open) {
+        close(input_pipe[1]);
+        input_pipe[1] = -1;
+        input_open = 0;
+      }
+    }
+    if (input_open && pending_offset < pending_length && pr > 0 &&
+        (pf[1].revents & POLLOUT)) {
+      ssize_t n = write(input_pipe[1], pending + pending_offset,
+                        pending_length - pending_offset);
+      if (n > 0) {
+        pending_offset += (size_t)n;
+        if (pending_offset == pending_length) {
+          pending_offset = 0;
+          pending_length = 0;
+        }
+      } else if (n < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+        close(input_pipe[1]);
+        input_pipe[1] = -1;
+        input_open = 0;
+      }
+    }
+
+    int out_fds[2] = { output_pipe[0], error_pipe[0] };
+    int out_open[2] = { output_open, error_open };
+    int out_events[2] = { pf[2].revents, pf[3].revents };
+    for (int i = 0; i < 2; i++) {
+      if (!out_open[i] || pr <= 0 ||
+          !(out_events[i] & (POLLIN | POLLHUP | POLLERR)))
+        continue;
+      ssize_t n = read(out_fds[i], buffer, sizeof(buffer));
+      if (n > 0) {
+        uint16_t type = i == 0 ? G4D_MSG_STDOUT : G4D_MSG_STDERR;
+        if (client_open && !send_frame(cfd, type, buffer, (size_t)n)) {
+          client_open = 0;
+          if (input_open) {
+            close(input_pipe[1]);
+            input_pipe[1] = -1;
+            input_open = 0;
+          }
+        }
+      } else if (n == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        if (i == 0) {
+          close(output_pipe[0]);
+          output_pipe[0] = -1;
+          output_open = 0;
+        } else {
+          close(error_pipe[0]);
+          error_pipe[0] = -1;
+          error_open = 0;
+        }
+      }
+    }
+
+    if (child_done && time(NULL) - child_done_at >= 2) {
+      if (output_open) {
+        close(output_pipe[0]);
+        output_pipe[0] = -1;
+        output_open = 0;
+      }
+      if (error_open) {
+        close(error_pipe[0]);
+        error_pipe[0] = -1;
+        error_open = 0;
+      }
+    }
+  }
+
+  if (!child_done) {
+    if (failed)
+      (void)kill(pid, SIGTERM);
+    if (waitpid(pid, &status, 0) == pid)
+      child_done = 1;
+  }
+  if (client_open) {
+    int32_t result = 1;
+    if (child_done && WIFEXITED(status))
+      result = WEXITSTATUS(status);
+    else if (child_done && WIFSIGNALED(status))
+      result = 128 + WTERMSIG(status);
+    (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
+  }
+
+cleanup:
+  for (int i = 0; i < 2; i++) {
+    if (input_pipe[i] >= 0)
+      close(input_pipe[i]);
+    if (output_pipe[i] >= 0)
+      close(output_pipe[i]);
+    if (error_pipe[i] >= 0)
+      close(error_pipe[i]);
+  }
+}
+
 /* Bridge framed client input/resize messages and PTY output. */
 static void bridge(int cfd, int master, pid_t shell) {
   int client_open = 1;
@@ -293,17 +562,20 @@ static void session(int cfd, const unsigned char prefix[6]) {
   _exit(0);
 }
 
-/* One su -c command on a PTY, with a framed stdin stream and exit status. */
+/* One su command with framed input/output and an exit status. */
 static void session_su(int cfd, const unsigned char prefix[6], pid_t peer_pid) {
   struct g4d_su_hello hello;
   memcpy(&hello, prefix, 6);
   if (!read_all(cfd, (unsigned char *)&hello + 6, sizeof(hello) - 6) ||
       hello.magic != G4D_PROTO_MAGIC || hello.version != G4D_SU_VERSION ||
-      (hello.flags & ~(G4D_SU_FLAG_MOUNT_MASTER | G4D_SU_FLAG_PRESERVE_ENV)) != 0 ||
+      (hello.flags & ~(G4D_SU_FLAG_MOUNT_MASTER | G4D_SU_FLAG_PRESERVE_ENV |
+                       G4D_SU_FLAG_NO_PTY | G4D_SU_FLAG_ANDROID_ENV |
+                       G4D_SU_FLAG_SHELL_CONTEXT)) != 0 ||
       hello.command_length == 0 ||
       hello.command_length > G4D_SU_MAX_COMMAND ||
       hello.environment_length > G4D_SU_MAX_ENV ||
-      (!(hello.flags & G4D_SU_FLAG_PRESERVE_ENV) && hello.environment_length != 0))
+      (!(hello.flags & (G4D_SU_FLAG_PRESERVE_ENV | G4D_SU_FLAG_ANDROID_ENV)) &&
+       hello.environment_length != 0))
     _exit(1);
 
   char *command = malloc((size_t)hello.command_length + 1);
@@ -345,6 +617,15 @@ static void session_su(int cfd, const unsigned char prefix[6], pid_t peer_pid) {
     }
   }
 
+  if (hello.flags & G4D_SU_FLAG_NO_PTY) {
+    session_su_pipes(cfd, peer_pid, hello.flags, command, environment,
+                     hello.environment_length);
+    free(environment);
+    free(command);
+    close(cfd);
+    _exit(0);
+  }
+
   /* Create and open the PTY pair before switching mount namespaces. Android
    * can expose different /dev/ptmx and /dev/pts mounts in an app namespace;
    * keeping the already-open pair avoids attaching the child to a different
@@ -366,31 +647,13 @@ static void session_su(int cfd, const unsigned char prefix[6], pid_t peer_pid) {
     (void)tcsetattr(slave_fd, TCSANOW, &term);
   }
 
-  if (!(hello.flags & G4D_SU_FLAG_MOUNT_MASTER)) {
-    char ns_path[64];
-    snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/mnt", peer_pid);
-    int nsfd = open(ns_path, O_RDONLY | O_CLOEXEC);
-    if (peer_pid <= 0 || nsfd < 0 || setns(nsfd, CLONE_NEWNS) != 0) {
-      int32_t result = G4D_SU_ERROR_MOUNT_NS;
-      (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
-      if (nsfd >= 0)
-        close(nsfd);
-      close(slave_fd);
-      close(master);
-      free(environment);
-      free(command);
-      _exit(0);
-    }
-    close(nsfd);
-    if (chdir("/") != 0) {
-      int32_t result = G4D_SU_ERROR_MOUNT_NS;
-      (void)send_frame(cfd, G4D_MSG_EXIT, &result, sizeof(result));
-      close(slave_fd);
-      close(master);
-      free(environment);
-      free(command);
-      _exit(0);
-    }
+  if (!(hello.flags & G4D_SU_FLAG_MOUNT_MASTER) &&
+      !enter_peer_mount_namespace(cfd, peer_pid)) {
+    close(slave_fd);
+    close(master);
+    free(environment);
+    free(command);
+    _exit(0);
   }
 
   struct sigaction default_chld;
@@ -411,19 +674,7 @@ static void session_su(int cfd, const unsigned char prefix[6], pid_t peer_pid) {
       close(slave_fd);
     close(master);
     close(cfd);
-    setenv("HOME", "/root", 1);
-    setenv("USER", "root", 1);
-    setenv("LOGNAME", "root", 1);
-    setenv("SHELL", G4D_SHELL, 1);
-    setenv("PATH", "/system/bin:/system/xbin:/vendor/bin:/vendor/xbin", 1);
-    for (size_t offset = 0; environment && offset < hello.environment_length;) {
-      char *entry = environment + offset;
-      size_t entry_length = strlen(entry);
-      char *equals = strchr(entry, '=');
-      *equals = '\0';
-      setenv(entry, equals + 1, 1);
-      offset += entry_length + 1;
-    }
+    set_su_environment(environment, hello.environment_length);
     signal(SIGPIPE, SIG_DFL);
     char *const argv[] = { (char *)"sh", (char *)"-c", command, NULL };
     execv(G4D_SHELL, argv);

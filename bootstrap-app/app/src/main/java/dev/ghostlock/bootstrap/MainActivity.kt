@@ -60,6 +60,7 @@ private const val REMOTE_G4MOUNT = "/data/local/tmp/a/g4mount"
 private const val REMOTE_G4EXEC = "/data/local/tmp/a/g4exec"
 private const val REMOTE_DEFEX = "/data/local/tmp/a/defex-exec.sh"
 private const val REMOTE_ALLOW = "/dev/ghostlock-g4d.allow"
+private const val REMOTE_SU_PID = "/dev/ghostlock-g4d-su.pid"
 private const val OLD_G4D_SHA256 = "34f542e0f9f91e8c67b0a13f23da527c2c8f906ece2c5ad40850dcedad23b651"
 private const val PREVIOUS_G4EXEC_SHA256 = "5158acd142ca93582dc96b86f6ec8165bfd51af43385f3aa5d4db5e6b2801348"
 private const val PREVIOUS_DEFEX_SHA256 = "61ca6c26c91f56ea5fbaa98e022224b928a77a6f01f5d71730f2a62ec1047144"
@@ -67,10 +68,16 @@ private const val ROOT_COMMAND_TIMEOUT_MS = 20_000L
 
 private val PREVIOUS_MANAGER_HASHES = mapOf(
     "g4d-su" to setOf(
+        "4800d0d28b13511f61e119cc92f40968d1812c37488a7efcf66c7ae597cef0fd",
+        "199ef51e3fd567fe35353379a45707f14e9a174cc67b23d5ef5211eb284b2d7f",
+        "e64e8e608e215075efcedc61112bc9943543d45b21265ad301f85214eac36727",
         "efdbf46d08105aef868cccb2d621c263c030b89d7e6dacb088f66528f0ec36e6",
         "5608f51e55577d01512c43f7835d59c805b6d28497cd5f91314e87896216e592",
     ),
     "g4su" to setOf(
+        "bcdc4d7afb546bd7ee6769e91c620633326c831f967d08d77aa9d8b9e4c67f68",
+        "571425bd967359402a5c01d025dbda4af0a103fd96781d9fb1f81bde8d44f3d2",
+        "655da7cc465300b3162b061f19d23f5f4ae5e0db671afcc706769377b92228b0",
         "211b175a0c630b4bbc141b45f478b49b1ce064244e3f4697a814e43dfa33675e",
         "03f761f113d0fdcb00e7c46a5be28d1f3a30a98d304ed47050033d5ce1296176",
         "b7f116363e347e4f0f0e11619af8fb31f699f02b1434c17053af395c739891e6",
@@ -109,8 +116,8 @@ private val PAYLOADS = listOf(
 )
 
 private val MANAGER_PAYLOADS = listOf(
-    Payload("g4d-su", REMOTE_G4D_SU, "e64e8e608e215075efcedc61112bc9943543d45b21265ad301f85214eac36727"),
-    Payload("g4su", REMOTE_G4SU, "655da7cc465300b3162b061f19d23f5f4ae5e0db671afcc706769377b92228b0"),
+    Payload("g4d-su", REMOTE_G4D_SU, "d3ae0d0bfba8beb0aabd101d56d01f82484ab227bfe2111f15cd939f777249aa"),
+    Payload("g4su", REMOTE_G4SU, "90ad28ac750f300682bb30290fe2fa0ec2aa6cff32ac210268fbb1b7c8e8544b"),
     Payload("g4mount", REMOTE_G4MOUNT, "8dbbb8ccee5629079eadb6b1d2f561068675a7ba81bab53613d08ac87c1c6b06"),
     Payload("g4exec", REMOTE_G4EXEC, "d431fb90b3525f5667a69105391caf44cb51cf6e91ec708f98343575366254fa"),
     Payload("defex-exec.sh", REMOTE_DEFEX, "aa8169c254a7f6d8dd52949b25a7a17d37c59e2586849ea9a4a327461026b53d"),
@@ -885,6 +892,8 @@ class MainActivity : Activity() {
         appendProgress("Checking the active root session…")
         val bootId = requireActiveRoot(client)
         val staged = mutableListOf<String>()
+        var suDaemonChanged = false
+        var suClientChanged = false
         for (payload in MANAGER_PAYLOADS) {
             appendProgress("Checking ${payload.asset}…")
             val localHash = assets.open("payload/${payload.asset}").use(::sha256)
@@ -913,6 +922,34 @@ class MainActivity : Activity() {
             val remoteHash = parseSha256(rootCommand(client, "sha256sum '${payload.path}'").output)
             require(remoteHash == payload.sha256) { "Device copy hash mismatch for ${payload.asset}: $remoteHash" }
             staged += payload.asset
+            if (payload.asset == "g4d-su") suDaemonChanged = true
+            if (payload.asset == "g4su") suClientChanged = true
+        }
+
+        if (suDaemonChanged) {
+            appendProgress("Restarting the app-facing su service for the updated protocol…")
+            val stopped = rootCommand(
+                client,
+                "pid=\$(cat '$REMOTE_SU_PID' 2>/dev/null); " +
+                    "case \"\$pid\" in ''|*[!0-9]*) ;; *) " +
+                    "comm=\$(cat \"/proc/\$pid/comm\" 2>/dev/null); " +
+                    "if [ \"\$comm\" = g4d ] || [ \"\$comm\" = g4d-su ]; then " +
+                    "kill \"\$pid\" || true; sleep 1; fi ;; esac; " +
+                    "rm -f '$REMOTE_SU_PID'",
+            )
+            require(stopped.exitCode == 0) { "Could not stop the old app-facing service: ${stopped.output}" }
+        }
+
+        if (suClientChanged) {
+            appendProgress("Refreshing the live app su entrypoint…")
+            val overlay = runDefexTarget(client, REMOTE_G4MOUNT, listOf("status"))
+            require(overlay.exitCode == 0) { "Could not inspect the live su entrypoint: ${overlay.output}" }
+            if (!overlay.output.contains("no su overlay.")) {
+                val removed = runDefexTarget(client, REMOTE_G4MOUNT, listOf("remove"))
+                require(removed.exitCode == 0) { "Could not remove the old su entrypoint: ${removed.output}" }
+                val installed = runDefexTarget(client, REMOTE_G4MOUNT, listOf("install"))
+                require(installed.exitCode == 0) { "Could not refresh the su entrypoint: ${installed.output}" }
+            }
         }
 
         appendProgress("Checking the app-facing su service…")

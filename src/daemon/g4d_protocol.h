@@ -19,6 +19,7 @@ enum g4d_message_type {
   G4D_MSG_RESIZE = 3,
   G4D_MSG_EOF = 4,
   G4D_MSG_EXIT = 5,
+  G4D_MSG_STDERR = 6,
 };
 
 struct g4d_hello {
@@ -43,6 +44,9 @@ struct g4d_su_hello {
 
 #define G4D_SU_FLAG_MOUNT_MASTER 0x0001u
 #define G4D_SU_FLAG_PRESERVE_ENV  0x0002u
+#define G4D_SU_FLAG_NO_PTY        0x0004u
+#define G4D_SU_FLAG_ANDROID_ENV   0x0008u
+#define G4D_SU_FLAG_SHELL_CONTEXT 0x0010u
 #define G4D_SU_ERROR_DENIED       (-13)
 #define G4D_SU_ERROR_MOUNT_NS    (-125)
 

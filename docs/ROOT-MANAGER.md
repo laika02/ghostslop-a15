@@ -15,7 +15,7 @@ g4su client ── abstract Unix socket ──► app-facing g4d daemon
                                              │
                                              ├─ checks current-boot UID list
                                              ├─ enters caller mount namespace
-                                             └─ runs /system/bin/sh -c as root
+                                             └─ runs UID 0 shell for that app
 ```
 
 The daemon obtains the caller credentials from `SO_PEERCRED`. It accepts root,
@@ -31,6 +31,15 @@ peer UID. By default, commands run in the caller's mount namespace; the
 interface supports common `su -c command` requests. It does not promise full
 compatibility with Magisk's daemon, modules, prompts, or vendor-specific
 options.
+
+Nonterminal app `su` sessions ask the daemon to enter Android's
+`u:r:shell:s0` SELinux context with `runcon`, while retaining UID 0. The
+exploit shell and interactive `g4sh` remain in their existing context. This is
+needed for Android framework Binder services such as Package Manager to be
+visible to root processes launched by apps. If the device blocks that context
+transition or lacks `runcon`, the session falls back to its inherited context;
+framework-backed root services may then fail. SELinux policy behavior outside
+the tested firmware can also limit filesystem access from the shell domain.
 
 ## Why the `/system/bin` overlay exists
 
@@ -91,21 +100,20 @@ and `/system/bin/su`; `su -c "id -u"` returned `0`. Root Checker Basic also
 reported root after its UID was granted. These results confirm the tested
 request path on this build, not broad root-app compatibility.
 
-Amaze File Manager was granted its UID and its root mode was enabled, but its
-root view of `/` showed no files. The app's `MANAGE_EXTERNAL_STORAGE` app-op
-was allowed; read-only inspection also showed that Amaze saw the corrected
-`/system/bin` metadata and the overlay mount. The listing issue remains
-unresolved. Amaze's root explorer may depend on a different su interaction or
-its own filesystem browsing behavior. Root Checker succeeding does not settle
-that question.
+A granted UID and a successful `su` handshake do not prove that every root
+service can use Android framework APIs. WiFi Password Manager 1.20 uses libsu's
+`RootService`; its first launch failed because the exploit context could not
+see Package Manager through Binder. On `SM-A156U` build
+`A156USQSCEZG1`, running nonterminal app shells in `u:r:shell:s0` fixed that
+failure: the root service stayed alive as UID 0 and the app logged
+`WiFiRootService connected`. This was verified in the current boot without
+rerunning the exploit.
 
-The current Amaze `release/4.0` source initializes a long-lived libsu shell
-with `Shell.FLAG_MOUNT_MASTER`, then uses `Shell.su(command).exec()` for root
-commands. Its root listing first runs `stat -c '%A %h %G %U %B %Y %N' *` and
-may retry with `ls -l`. GhostSlop's client accepts `--mount-master` and has an
-interactive-shell mode, but the phone checks recorded so far covered only
-short `su -c` commands. That makes persistent-shell/libsu compatibility a
-specific unverified area on the GhostSlop side. See Amaze's
+Amaze File Manager 3.11.4 also worked after the change. After force-stopping
+and reopening it, its Root location listed `/` with 34 folders and 7 files;
+previously that view showed no files. Its `release/4.0` source uses a
+long-lived libsu shell with `Shell.FLAG_MOUNT_MASTER`, so this also checks a
+persistent-shell and mount-master request. See Amaze's
 [`MainActivity`](https://github.com/TeamAmaze/AmazeFileManager/blob/release/4.0/app/src/main/java/com/amaze/filemanager/ui/activities/MainActivity.java#L779),
 [`IRootCommand`](https://github.com/TeamAmaze/AmazeFileManager/blob/release/4.0/app/src/main/java/com/amaze/filemanager/filesystem/root/base/IRootCommand.kt#L60),
 and [`ListFilesCommand`](https://github.com/TeamAmaze/AmazeFileManager/blob/release/4.0/app/src/main/java/com/amaze/filemanager/filesystem/root/ListFilesCommand.kt#L102).
