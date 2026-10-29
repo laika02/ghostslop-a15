@@ -197,7 +197,7 @@ out:
   return ok ? 0 : 1;
 }
 
-static int bootstrap_is_ours(void) {
+static int bootstrap_is_ours(int *inherited_mounts) {
   struct stat executable, alias;
   if (stat("/proc/self/exe", &executable) != 0 ||
       stat(DEFEX_ALIAS, &alias) != 0 || !same_file(&executable, &alias)) {
@@ -206,15 +206,16 @@ static int bootstrap_is_ours(void) {
     return 0;
   }
   int count = mount_count(DEFEX_ALIAS, "/proc/self/mountinfo");
-  if (count != 1) {
-    fprintf(stderr, "g4exec: refusing alias with %d existing mount(s)\n",
+  if (count < 1) {
+    fprintf(stderr, "g4exec: helper alias mount is missing (%d mounts)\n",
             count);
     return 0;
   }
+  *inherited_mounts = count - 1;
   return 1;
 }
 
-static int run_target(int argc, char **argv) {
+static int run_target(int argc, char **argv, int inherited_mounts) {
   const char *target = argv[1];
   struct stat target_stat, current_stat, alias_stat;
   if (stat(target, &target_stat) != 0 || !S_ISREG(target_stat.st_mode) ||
@@ -243,7 +244,8 @@ static int run_target(int argc, char **argv) {
   int owned_mounts = 1;
   int rc = 1;
   owned_mounts++;
-  if (mount_count(DEFEX_ALIAS, "/proc/self/mountinfo") != 2 ||
+  if (mount_count(DEFEX_ALIAS, "/proc/self/mountinfo") !=
+          inherited_mounts + 2 ||
       stat(DEFEX_ALIAS, &alias_stat) != 0 ||
       !same_file(&target_stat, &alias_stat) ||
       pid1_has_mount(DEFEX_ALIAS)) {
@@ -321,19 +323,19 @@ static int run_target(int argc, char **argv) {
        * long-running shell can launch further commands through g4run. */
       while (owned_mounts > 0) {
         int count = mount_count(DEFEX_ALIAS, "/proc/self/mountinfo");
-        if (count != owned_mounts ||
+        if (count != inherited_mounts + owned_mounts ||
             umount2(DEFEX_ALIAS, MNT_DETACH) != 0) {
           fprintf(stderr,
                   "g4exec: could not detach aliases after exec "
-                  "(owned=%d visible=%d): %s\n",
-                  owned_mounts, count, strerror(errno));
+                  "(inherited=%d owned=%d visible=%d): %s\n",
+                  inherited_mounts, owned_mounts, count, strerror(errno));
           rc = 1;
           (void)kill(child, SIGKILL);
           break;
         }
         owned_mounts--;
         if (mount_count(DEFEX_ALIAS, "/proc/self/mountinfo") !=
-            owned_mounts) {
+            inherited_mounts + owned_mounts) {
           fprintf(stderr, "g4exec: alias count changed during cleanup\n");
           rc = 1;
           (void)kill(child, SIGKILL);
@@ -373,11 +375,11 @@ static int run_target(int argc, char **argv) {
 cleanup:
   while (owned_mounts > 0) {
     int count = mount_count(DEFEX_ALIAS, "/proc/self/mountinfo");
-    if (count != owned_mounts) {
+    if (count != inherited_mounts + owned_mounts) {
       fprintf(stderr,
               "g4exec: alias mount count changed unexpectedly "
-              "(owned=%d visible=%d)\n",
-              owned_mounts, count);
+              "(inherited=%d owned=%d visible=%d)\n",
+              inherited_mounts, owned_mounts, count);
       rc = 1;
       break;
     }
@@ -388,7 +390,7 @@ cleanup:
     }
     owned_mounts--;
   }
-  if (mount_count(DEFEX_ALIAS, "/proc/self/mountinfo") != 0 ||
+  if (mount_count(DEFEX_ALIAS, "/proc/self/mountinfo") != inherited_mounts ||
       pid1_has_mount(DEFEX_ALIAS)) {
     fprintf(stderr, "g4exec: alias cleanup verification failed\n");
     rc = 1;
@@ -403,9 +405,10 @@ int main(int argc, char **argv) {
     return 1;
   unsetenv("G4DEFEX_PARENT_MNT");
   unsetenv("G4DEFEX_PRIVATE_NS");
-  if (!bootstrap_is_ours())
-    return 1;
   if (!prepare_private_namespace())
+    return 1;
+  int inherited_mounts = 0;
+  if (!bootstrap_is_ours(&inherited_mounts))
     return 1;
   if (pid1_has_mount(DEFEX_ALIAS)) {
     fprintf(stderr, "g4exec: refusing to proceed while PID 1 has alias mount\n");
@@ -417,5 +420,5 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: g4exec EXECUTABLE [ARG ...]\n");
     return 2;
   }
-  return run_target(argc, argv);
+  return run_target(argc, argv, inherited_mounts);
 }

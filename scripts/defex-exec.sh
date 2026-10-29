@@ -58,34 +58,55 @@ pid1_has_alias() {
   return 1
 }
 
-before=$(mount_count)
-if [ "$before" -ne 0 ]; then
-  echo "defex-exec: refusing pre-existing/stacked alias ($before mount(s))" >&2
-  exit 1
-fi
+has_shared_mount() {
+  [ -r /proc/self/mountinfo ] || return 0
+  while read -r id parent dev root mountpoint options optional; do
+    case " $optional " in
+      *" shared:"*) return 0 ;;
+    esac
+  done < /proc/self/mountinfo
+  return 1
+}
+
 if pid1_has_alias; then
   echo "defex-exec: alias already appears in PID 1 mountinfo" >&2
   exit 1
 fi
 
+# A root daemon can leave a private /system/bin/lmkd mount in the caller's
+# namespace. Keep that inherited layer untouched. First stop mount events from
+# propagating out of this new namespace, then let g4exec make it fully private.
+# Android's /etc/fstab is absent, so pass both paths. For propagation changes,
+# the kernel ignores the source and filesystem type arguments.
+if ! /system/bin/mount -t ext4 -o rslave / /; then
+  echo "defex-exec: could not isolate mount propagation before staging alias" >&2
+  exit 1
+fi
+if has_shared_mount; then
+  echo "defex-exec: shared mounts remain after recursive slave conversion" >&2
+  exit 1
+fi
+
+before=$(mount_count)
+case "$before" in
+  ''|*[!0-9]*)
+    echo "defex-exec: could not count inherited alias mounts" >&2
+    exit 1
+    ;;
+esac
+
 cleanup() {
   trap - EXIT HUP INT TERM
   count=$(mount_count)
-  if [ "$count" -gt 2 ]; then
-    echo "defex-exec: leaving $count alias mounts untouched; ownership unclear" >&2
-    return 1
-  fi
-  attempt=0
-  while [ "$count" -gt 0 ] && [ "$attempt" -lt 2 ]; do
+  if [ "$count" -eq "$((before + 1))" ]; then
     if ! /system/bin/umount -l "$DEFEX_ALIAS" 2>/dev/null; then
-      echo "defex-exec: could not detach alias mount" >&2
-      break
+      echo "defex-exec: could not detach the helper alias" >&2
+      return 1
     fi
-    attempt=$((attempt + 1))
     count=$(mount_count)
-  done
-  if [ "$count" -ne 0 ]; then
-    echo "defex-exec: $count alias mount(s) remain in this namespace" >&2
+  fi
+  if [ "$count" -ne "$before" ]; then
+    echo "defex-exec: alias mount count changed unexpectedly (inherited=$before visible=$count)" >&2
     return 1
   fi
   if pid1_has_alias; then
@@ -103,8 +124,8 @@ if ! /system/bin/mount --bind "$G4EXEC_HELPER" "$DEFEX_ALIAS"; then
   echo "defex-exec: could not stage helper at $DEFEX_ALIAS" >&2
   exit 1
 fi
-if [ "$(mount_count)" -ne 1 ]; then
-  echo "defex-exec: helper alias did not appear exactly once" >&2
+if [ "$(mount_count)" -ne "$((before + 1))" ]; then
+  echo "defex-exec: helper alias count changed unexpectedly" >&2
   exit 1
 fi
 if [ "$1" = "--self-test" ]; then

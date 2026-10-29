@@ -1,156 +1,131 @@
-# GhostLock A15 research port
+# GhostSlop A15 Root Manager
 
-This tree contains the device-specific GhostLock research port for the
-Samsung Galaxy A15 SM-A156U. The successful run documented here was on
-kernel `5.15.189-android13-8-33641424`, firmware `A156USQSCEZG1`.
+GhostSlop is an experimental, one-boot root manager for one Samsung Galaxy A15
+firmware build. It uses a manually triggered kernel exploit to open a root
+session, then lets you grant selected app UIDs access through a temporary
+`su` entrypoint.
 
-The repository tracks source and reviewable documentation. It intentionally
-does not track compiled binaries, device dumps, experimental run logs, or
-retry scripts. The active one-shot launcher is
-[`scripts/adb-trigger.sh`](scripts/adb-trigger.sh).
+This project is for device-owner research on the exact supported build below.
+It is not Magisk, does not unlock the bootloader, and does not install
+persistent root. A failed kernel exploit can still panic or reboot the phone.
 
-## Verified result
+## Supported device
 
-Three session-only, one-boot root runs have completed on this target. The
-EDEADLK-path candidate documented below succeeded twice and failed twice on
-separate boots, including one failure followed by an ADB disconnect and
-reboot. That is not enough to establish reliability. Evidence and limits are in
-[`docs/A15-ONE-BOOT-RESULT.md`](docs/A15-ONE-BOOT-RESULT.md). This is not a
-reliability estimate. Failed MCAST/PI handoffs have panicked the kernel; the
-launcher refuses a second attempt in the same boot and never reboots
-automatically.
+The app checks all of these values before staging the exploit:
 
-## Build the current EDEADLK-path candidate
+| Property | Supported value |
+| --- | --- |
+| Model | `SM-A156U` |
+| Kernel | `5.15.189-android13-8-33641424` |
+| Firmware fingerprint | `samsung/a15xsq/a15x:16/BP4A.251205.006/A156USQSCEZG1:user/release-keys` |
+| Bootloader build | `A156USQSCEZG1` |
 
-The current source build uses Android NDK r30. On Linux, provide the NDK path
-and host tag explicitly:
+Do not try the payload on another model or firmware. The app refuses a
+mismatch, and this project makes no compatibility claim for other devices.
 
-```sh
-make a15 NDK_ROOT=/path/to/android-ndk-r30 HOST_TAG=linux-x86_64
-sha256sum ghostlock-a15
-```
+## What has been confirmed
 
-The current local candidate SHA-256 pinned by the launcher is:
+- A one-boot root session and the app-facing `su` daemon work on the supported
+  A156U build.
+- Root Checker Basic received UID 0 after its UID was granted.
+- The app's own `su` self-check succeeded after preparing the manager, granting
+  the manager app's UID, installing the overlay, and reopening the app.
+- Amaze File Manager was granted root, but its root view of `/` showed an empty
+  listing. This is still under investigation; the result does not establish
+  that Amaze can use this custom `su` implementation.
 
-```text
-392b205b05c6eda39f4ecc401109859a38b7d585ff90912e85fdf5861a8a0617
-```
+The test evidence and device-specific engineering notes are in
+[`docs/A15-ONE-BOOT-RESULT.md`](docs/A15-ONE-BOOT-RESULT.md),
+[`docs/DEFEX-SAFEPLACE.md`](docs/DEFEX-SAFEPLACE.md), and
+[`docs/ROOT-MANAGER.md`](docs/ROOT-MANAGER.md).
 
-This candidate restores GhostLock's intended cyclic PI chain and accepts the
-trigger only when `FUTEX_CMP_REQUEUE_PI` returns `-1/EDEADLK` and the waiter
-then times out. It also checks the chain's `FUTEX_WAITERS` bit before the
-requeue, so a missed owner-queue handoff stops before MCAST. It compiled and
-ran once on the phone: the candidate verified the fops overwrite, canary,
-reversible data writes, pipe read/write channel, UMH completion, and a fresh
-root shell. The current boot session is volatile and ends on reboot. The
-previous candidate hash was
-`8371b050161b517c4f8797625283b5f8543efd3fa363de69fe96605a07721e43`; it
-requeued one waiter successfully, then timed out and failed the fops readback.
-That successful requeue did not establish GhostLock's EDEADLK trigger. The
-older guarded build hash was
-`07d47cebb8b9ce982a8d03376c5be273351b0bd2c175b0940b7cab270c5c633a`; it
-rejected the EDEADLK result before MCAST on both attempts. An earlier
-successful binary SHA-256 was
-`d4dcc86234d9d8b65f910e31c999bdc6ffad9a8d913705cced522e5c986a7831`. The
-launcher accepts only the current candidate. Build outputs are ignored by Git.
+## Build and install
 
-## Trigger over ADB
+Build requirements: Linux, Android SDK platform/build-tools 36, Java 17 or
+newer, and Android NDK r30. Gradle downloads its declared dependencies on the
+first build.
 
-Connect the A15 to the computer and confirm ADB lists it as an online
-`device`:
+From the repository root, set `NDK_ROOT` to your NDK directory and `HOST_TAG`
+to the NDK host directory for your system:
 
 ```sh
-adb devices -l
+make NDK_ROOT=/path/to/android-ndk-r30 HOST_TAG=linux-x86_64 \
+  a15 g4d g4sh g4exec g4d-su g4su g4mount
+cd bootstrap-app
+./gradlew assembleDebug
 ```
 
-From this repository, run the launcher with the EDEADLK-path candidate:
+The debug APK is written to
+`bootstrap-app/app/build/outputs/apk/debug/app-debug.apk`. From the repository
+root, install it with:
 
 ```sh
-./scripts/adb-trigger.sh ./ghostlock-a15
+adb install -r bootstrap-app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-With multiple devices connected, set `ADB_SERIAL` to the A15's serial. The
-script also accepts the binary path as its first argument or through
-`GHOSTLOCK_BIN`.
+The Gradle command runs from `bootstrap-app`. Native payload hashes are pinned
+in the app build; a changed or mismatched payload is rejected instead of being
+packaged. The repository does not track generated binaries or debug APKs.
 
-The launcher checks the model, kernel, clean boot state, SELinux mode, ADB
-shell identity, helper files, and local/staged binary hashes. It asks you to
-type `TRIGGER`, records one attempt for that boot ID on the computer, stages a
-temporary executable under `/data/local/tmp`, and checks the result with
-`g4sh`. On an unattempted boot it removes a leftover staged file only when its
-hash matches the pinned candidate, then stages the verified binary. It prints
-a copyable root-check command and interactive fish-shell instructions after
-verifying root. It never retries or reboots.
-A kernel panic is still possible; if a panic cuts off ADB, best-effort cleanup
-of the staged file may not complete.
+## Use the manager
 
-The same script can run in Termux if its ADB client is working and can see the
-phone. `scripts/termux-trigger.sh` is a compatibility symlink. The current
-Termux install reported a missing `_ZNSt6__ndk113__hash_memoryEPKvm` symbol
-from `$PREFIX/bin/adb`; that runtime/package mismatch must be repaired first.
-Read-only diagnostics are:
+The app has separate **Exploit** and **Root Manager** tabs. The manager can
+only prepare app access after a root session is active. For the full steps,
+recovery notes, and known app compatibility issues, read
+[`bootstrap-app/README.md`](bootstrap-app/README.md) and
+[`docs/ROOT-MANAGER.md`](docs/ROOT-MANAGER.md).
 
-```sh
-type -a adb
-dpkg -s android-tools libc++ | grep -E '^(Package|Version|Status):'
-termux-info
-```
+At a glance:
 
-## Verify a live root session
+1. Enable **Developer options → Wireless debugging**. On first pairing, open
+   Android's **Pair device with pairing code** screen. Enter the pairing port
+   and six-digit code in GhostSlop; it pairs and discovers the connection port
+   automatically.
+2. In **Exploit**, tap **Check & stage exploit**. This validates the device and
+   stages the files; it does not run the exploit.
+3. Tap **Trigger exploit once** only if you intend to run the one-shot attempt.
+   The app asks for confirmation and will not retry within the same boot.
+4. When the banner says **EXPLOIT ACTIVE**, open **Root Manager** and tap
+   **Prepare manager**.
+5. Tap **Choose apps & enable su**, select app UID groups, and apply. The app
+   writes the current-boot grants and installs the RAM-backed `su` overlay.
+6. Force-stop and reopen selected apps that were already running. Use **Check
+   manager status** or **Test this app's su access** to inspect the manager.
 
-Use ADB shell to reach the helper:
+## What changes at runtime
 
-```sh
-adb shell '/data/local/tmp/a/g4sh -c "id"'
-```
+The manager is volatile. The UID grant list lives in `/dev` tmpfs, and the
+`/system/bin/su` entrypoint is exposed through an overlay in live zygote mount
+namespaces. Reboot clears the daemon, grants, and overlay. Wireless Debugging
+pairing credentials are stored in the app's private data so the app can try to
+reconnect; Android may still require pairing again if that pairing is revoked
+or unavailable.
 
-A successful one-boot session reports `uid=0(root)` with context
-`u:r:kernel:s0`. Plain `adb shell id` reports the normal unprivileged shell
-user. Calling `/data/local/tmp/a/g4sh` directly in Termux runs as the Termux
-app UID and is not a root check; `g4d` accepts root or ADB-shell peers.
+The app's allowlist is by Linux UID. Packages sharing a UID share a grant.
+Selecting an app does not show a separate approval dialog in that app: access
+is controlled by the list you apply in GhostSlop. Common `su -c command` usage
+is supported; some root apps expect Magisk-specific interfaces or options and
+may not work.
 
-The root daemon and SELinux state are volatile. Rebooting ends the session;
-this project does not install a boot image or persistent root service.
+No boot, vbmeta, recovery, or system partition is flashed or patched. The
+kernel exploit itself can crash the running kernel; keep important data backed
+up and use only on a device you own and are authorized to modify.
 
-## Shell terminal behavior
+## Repository map
 
-`g4sh` and `g4d` have a versioned terminal protocol that carries terminal
-dimensions, `TERM`/`TERMINFO`, and resize events. Build and deploy both from
-the same revision; the updated client cannot talk to an older daemon. The new
-pair was tested on-device through a separate `@ghostlockd_ptytest` socket; the
-existing `@ghostlockd` service was left running. The PTY and arrow-key check
-passed for one interactive `nnn` session. See
-[`docs/G4SH-PTY.md`](docs/G4SH-PTY.md) for details.
+- `bootstrap-app/` — Android Wireless Debugging bootstrap and root manager.
+- `src/daemon/` — root daemon, `su` client, mount manager, and shell client.
+- `src/core/` — device-specific kernel exploit research source.
+- `scripts/` — ADB trigger and guarded DEFEX execution helpers.
+- `docs/` — exploit results, root-manager architecture, and compatibility
+  findings.
 
-The observed Termux execution restriction and temporary bind-mount result are
-recorded in [`docs/DEFEX-SAFEPLACE.md`](docs/DEFEX-SAFEPLACE.md). The new
-`g4exec` helper and `scripts/defex-exec.sh` provide a guarded, one-command
-launcher that checks a private mount namespace and cleans its overlays. Its
-disposable-file self-test and one Termux binary launch passed on this boot;
-`/system/bin/lmkd` is the only path tested on this firmware. Do not pass
-untrusted executables. This manual helper does not replace the existing
-`umh_root.c` daemon startup sequence.
+The exploit history and lower-level build/trigger process are documented in
+[`docs/A15-ONE-BOOT-RESULT.md`](docs/A15-ONE-BOOT-RESULT.md). The terminal
+protocol and Termux helper notes are in [`docs/G4SH-PTY.md`](docs/G4SH-PTY.md)
+and [`docs/DEFEX-SAFEPLACE.md`](docs/DEFEX-SAFEPLACE.md).
 
-From the live g4sh root shell, source the small function once, then use
-`g4run` to resolve names from Termux's `bin` directory first, then the shell
-`PATH`:
+## License
 
-```sh
-. /data/local/tmp/a/g4run-init.sh
-g4run nnn /data
-g4run fish
-```
-
-The fish launcher sources `scripts/g4run-fish-init.fish`, which wraps Termux
-executables so ordinary fish commands also go through the DEFEX helper. It
-overrides default fish functions such as `ls` when a Termux executable has the
-same name, while leaving fish builtins intact. The temporary alias mounts are
-detached immediately after each executable starts, so fish can call the wrapper
-again for later commands. Run this inside the root g4sh session; launching it
-directly from the Termux app UID is not authorized by g4d.
-
-## License and attribution
-
-See [`LICENSE`](LICENSE). This A15 work is a device-specific port of the
-GhostLock research tree; the shared source also retains code needed to build
-the other existing target profiles.
+See [`LICENSE`](LICENSE) and the notices for the bundled ADB library in
+[`bootstrap-app/adb-kt/NOTICE.md`](bootstrap-app/adb-kt/NOTICE.md).

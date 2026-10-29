@@ -50,15 +50,18 @@ set of mounts. That existing launcher must not be treated as mount-isolated.
 
 The new `scripts/defex-exec.sh` and `src/daemon/g4exec.c` provide a separate,
 guarded path for an explicitly selected executable. The script enters a new
-mount namespace, refuses an existing `/system/bin/lmkd` overlay, temporarily
-bind mounts `g4exec` at that alias, then lets `g4exec` set recursive private
-propagation and verify it before adding the target overlay. The helper checks
-mountinfo and `/proc/1/mountinfo`, refuses stacked aliases, and removes both
-its target and helper overlays as soon as the target's `execve` succeeds. This
-allows a long-running target such as fish to launch later commands through a
-fresh helper invocation. The shell wrapper limits fallback cleanup to the
-mounts it created. This is still device-specific and must pass the disposable
-mount self-test before use; it is not a general su manager.
+mount namespace, confirms `/system/bin/lmkd` is absent from PID 1, and converts
+the new namespace's mount tree to recursive slave propagation before staging
+the helper. This prevents the temporary helper mount from propagating out of
+the new namespace. It can leave an inherited alias layer untouched while
+stacking its own helper layer above it. `g4exec` then makes propagation fully
+private and verifies it before adding the target overlay. The helper tracks
+and removes only the layers it created as soon as the target's `execve`
+succeeds. This allows a long-running target such as fish to launch later
+commands through a fresh helper invocation. The shell wrapper preserves the
+inherited layer count and cleans only its own helper mount. This remains
+device-specific and must pass the disposable mount self-test before use; it is
+not a general su manager.
 
 The user observed different mount namespace IDs for `g4sh` and PID 1. Their
 mountinfo showed several `/system/bin/lmkd` overlays in the shell's namespace
@@ -68,12 +71,13 @@ util-linux `--make-rprivate` option in the reported session.
 
 ## Isolation status and limits
 
-The new helper verifies that `unshare -m` changed the mount namespace, makes
-the new namespace recursively private with `MS_REC|MS_PRIVATE`, and checks
-`mountinfo` before running a target. It refuses a pre-existing alias, checks
-that the alias is absent from PID 1's mountinfo, and cleans the two expected
-mount layers on normal exit and catchable signals. Its disposable self-test
-passed on this firmware.
+The new helper verifies that `unshare -m` changed the mount namespace and that
+the shell wrapper removed outward propagation before mounting the helper. It
+then makes the namespace recursively private with `MS_REC|MS_PRIVATE` and
+checks `mountinfo` before running a target. It refuses an alias visible in
+PID 1, preserves inherited alias layers inside the isolated namespace, and
+cleans only its helper and target mounts on normal exit and catchable signals.
+Its disposable self-test passed on this firmware.
 
 The `/system/bin/lmkd` alias is a critical daemon path and was used only as a
 tested example. The helper cannot clean up after `SIGKILL` or a kernel crash;
@@ -146,3 +150,32 @@ alone. After reloading the updated init file in the active fish session, the
 user confirmed `ls /` worked. This validates the fish command wrapper for
 `id` and `ls` in this session; it does not establish that programs which launch
 their own Termux child processes will also work through the wrapper.
+
+## App-facing su execution experiment (2026-10-29)
+
+The GhostSlop app initially failed before it could contact `g4d`:
+`ProcessBuilder("/system/bin/sh", ...)` returned `EACCES`. Changing the
+RAM-backed client copy to the generic `system_file` SELinux label did not fix
+the failure. SELinux was permissive, and the kernel log had no relevant AVC or
+DEFEX record.
+
+Read-only inspection of the app's mount namespace identified the cause. The
+firmware's original `/system/bin` was mode `0751`, UID:GID `0:2000`, but the
+overlay exposed it as `0700`, UID:GID `0:0`; `/system/bin/sh` itself remained
+`0755`. `g4mount` had created the overlay upper directory as `0700`. OverlayFS
+reports the upper directory's metadata for a merged directory, so app
+processes could not traverse `/system/bin`. Linux reports `EACCES` when
+pathname search permission is denied. See the Linux 5.15 [OverlayFS directory
+metadata documentation](https://docs.kernel.org/5.15/filesystems/overlayfs.html#directories)
+and [`execve(2)` errors](https://man7.org/linux/man-pages/man2/execve.2.html).
+
+`g4mount` now reads `/system/bin` metadata before installing the overlay, then
+applies that UID, GID, and mode to the upper directory. The RAM parent and
+overlay work directory remain private. On the A156U Android 16 build, a fresh
+GhostSlop process then saw `/system/bin` as `0751 0:2000`; its app-side checks
+successfully launched `/system/bin/sh`, ran `/system/bin/su -v`, and received
+UID 0 from `/system/bin/su -c "id -u"`. Root Checker Basic (UID 10310) also
+reported that root access was properly installed. The live allowlist was
+restored to Root Checker (10310), Amaze (10317), and Termux (10338). These
+mounts and grants exist only for this boot; no boot, vbmeta, recovery, or
+system partition was modified.

@@ -1,5 +1,5 @@
-# Default-deny this mixed research workspace: only the A15 source, launcher,
-# license, build file, README, and one-boot result record are tracked.
+# Default-deny this mixed research workspace. The tracked A15 project includes
+# the root manager app, native helpers, launchers, and reviewable documentation.
 /*
 !/.gitignore
 !/LICENSE
@@ -20,6 +20,9 @@
 !/docs/A15-ONE-BOOT-RESULT.md
 !/docs/DEFEX-SAFEPLACE.md
 !/docs/G4SH-PTY.md
+!/docs/ROOT-MANAGER.md
+!/bootstrap-app/
+!/bootstrap-app/**
 
 # Generated build products and local captures are never source.
 *.o

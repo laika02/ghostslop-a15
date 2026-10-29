@@ -22,9 +22,9 @@ CFLAGS := -O2 -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function
   -Isrc/core -Isrc/devices -DTARGET_CONFIG_H=\"$(TARGET)\"
 LDFLAGS := -fPIE -pie -pthread
 
-.PHONY: all clean czg1 a15
+.PHONY: all clean czg1 a15 g4d g4d-su g4su g4mount
 
-all: ghostlock g4d g4sh g4exec
+all: ghostlock g4d g4sh g4exec g4d-su g4su g4mount
 
 ghostlock: $(SRCS) src/core/$(TARGET)
 	$(NDK_CC) $(CFLAGS) $(LDFLAGS) $(SRCS) -o $@
@@ -54,11 +54,25 @@ endif
 g4d: src/daemon/g4d.c src/daemon/g4d_protocol.h
 	$(NDK_CC) -O2 -Wall $(STATIC) src/daemon/g4d.c -o $@
 
+# Companion service for the app-facing manager. Its private socket keeps it
+# separate from @ghostlocksu, so it can start without replacing the shell daemon.
+g4d-su: src/daemon/g4d.c src/daemon/g4d_protocol.h
+	$(NDK_CC) -O2 -Wall $(STATIC) -DG4D_SU_ONLY_DEFAULT=1 \
+	  -DG4D_SU_NAME='"ghostlocksu_mgr2"' \
+	  -DG4D_PIDF='"/dev/ghostlock-g4d-su.pid"' src/daemon/g4d.c -o $@
+
 g4sh: src/daemon/g4sh.c src/daemon/g4d_protocol.h
 	$(NDK_CC) -O2 -Wall $(STATIC) src/daemon/g4sh.c -o $@
+
+g4su: src/daemon/g4su.c src/daemon/g4d_protocol.h
+	$(NDK_CC) -O2 -Wall $(STATIC) -DG4D_SU_NAME='"ghostlocksu_mgr2"' \
+	  src/daemon/g4su.c -o $@
+
+g4mount: src/daemon/g4mount.c
+	$(NDK_CC) -O2 -Wall $(STATIC) src/daemon/g4mount.c -o $@
 
 g4exec: src/daemon/g4exec.c
 	$(NDK_CC) -O2 -Wall $(STATIC) src/daemon/g4exec.c -o $@
 
 clean:
-	rm -f ghostlock g4d g4sh g4exec
+	rm -f ghostlock g4d g4sh g4exec g4d-su g4su g4mount
