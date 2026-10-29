@@ -61,7 +61,10 @@ debug key and is not a Play Store release.
    works, open the pairing screen again and pair again. The optional connect
    port override is for networks where discovery does not find the service. If
    the saved pairing is present but root status is unknown, GhostSlop retries
-   the connection check every five seconds while the app is open.
+   the connection check every five seconds while the app is open. It rediscovers
+   the current connect port for each action and retries discovery once after a
+   refused connection, so a port from an earlier Wireless Debugging session is
+   not reused automatically.
 
 ## Start a root session
 

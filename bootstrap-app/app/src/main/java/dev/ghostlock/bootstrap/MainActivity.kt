@@ -39,6 +39,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.collect
 import java.io.File
+import java.net.ConnectException
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.security.MessageDigest
@@ -616,14 +617,14 @@ class MainActivity : Activity() {
         statusPollJob = scope.launch {
             while (isActive) {
                 while (isActive && statusCheckRunning) delay(250L)
-                if (!isActive || !exploitStatusUnknown) break
+                if (!isActive) break
                 val pairingSaved = getSharedPreferences("adb-pairing", MODE_PRIVATE)
                     .getString("device_guid", null).isNullOrBlank().not()
                 if (exploitStatusUnknown && pairingSaved && !busy && !statusCheckRunning) {
                     refreshExploitStatus()
                     while (isActive && statusCheckRunning) delay(250L)
                 }
-                if (exploitStatusUnknown) delay(5_000L)
+                delay(5_000L)
             }
         }
     }
@@ -714,7 +715,7 @@ class MainActivity : Activity() {
         val paired = pair(inputs)
         return try {
             val discovered = discoverConnectPort()
-            "$paired\n$discovered. The connect port is now saved for this session."
+            "$paired\n$discovered. GhostSlop will rediscover the endpoint for later connections."
         } catch (e: Exception) {
             withContext(Dispatchers.Main) { setPairedUi(false) }
             "$paired\nAutomatic connect-port discovery did not finish: ${e.message}. The app will retry discovery when you use an action."
@@ -723,8 +724,7 @@ class MainActivity : Activity() {
 
     private suspend fun discoverConnectPort(): String {
         val port = withTimeout(18_000) { discoverLocalAdbPort() }
-        withContext(Dispatchers.Main) { connectPortInput.setText(port.toString()) }
-        return "Found a Wireless Debugging connect port on this phone: $port"
+        return "Found the current Wireless Debugging connect port: $port"
     }
 
     private suspend fun stagePayload(inputs: UiInputs): String = withAdb(inputs) { client ->
@@ -1208,21 +1208,64 @@ class MainActivity : Activity() {
     private suspend fun <T> withAdb(inputs: UiInputs, block: suspend (AdbClient) -> T): T {
         val guid = getSharedPreferences("adb-pairing", MODE_PRIVATE).getString("device_guid", null)
         require(!guid.isNullOrBlank()) { "Pair this app with Wireless Debugging first." }
-        val port = if (inputs.connectPort.isBlank()) {
-            withTimeout(18_000) { discoverLocalAdbPort() }
-        } else {
-            inputs.connectPort.toIntOrNull()?.takeIf { it in 1..65535 }
-                ?: error("Enter a valid Wireless Debugging connect port or clear the override for automatic discovery.")
+        val client = try {
+            connectWirelessAdb(inputs)
+        } catch (e: CancellationException) {
+            if (e is TimeoutCancellationException) {
+                withContext(Dispatchers.Main) { setExploitStatus(null) }
+                throw IllegalStateException("Wireless Debugging service discovery timed out. Keep Wireless debugging enabled and retry.", e)
+            }
+            throw e
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) { setExploitStatus(null) }
+            throw e
         }
-        val keys = keyProvider()
-        val identity = buildPairingIdentity(keys)
-        val client = AdbClient.connectTls(ADB_HOST, port, keys, identity)
         try {
             val uid = command(client, "id -u")
             require(uid == "2000") { "ADB connection is not shell UID 2000 (got $uid)." }
             return block(client)
         } finally {
             client.close()
+        }
+    }
+
+    private suspend fun connectWirelessAdb(inputs: UiInputs): AdbClient {
+        val overridePort = if (inputs.connectPort.isBlank()) null else {
+            inputs.connectPort.toIntOrNull()?.takeIf { it in 1..65535 }
+                ?: error("Enter a valid Wireless Debugging connect port or clear the override for automatic discovery.")
+        }
+        var port = overridePort ?: withTimeout(18_000) { discoverLocalAdbPort() }
+        val keys = keyProvider()
+        val identity = buildPairingIdentity(keys)
+        try {
+            return AdbClient.connectTls(ADB_HOST, port, keys, identity)
+        } catch (first: ConnectException) {
+            val firstPort = port
+            port = try {
+                withTimeout(18_000) { discoverLocalAdbPort() }
+            } catch (rediscovery: TimeoutCancellationException) {
+                first.addSuppressed(rediscovery)
+                throw IllegalStateException(
+                    "Wireless Debugging refused port $firstPort, and refreshed discovery timed out.",
+                    first,
+                )
+            } catch (rediscovery: CancellationException) {
+                throw rediscovery
+            } catch (rediscovery: Exception) {
+                first.addSuppressed(rediscovery)
+                throw IllegalStateException(
+                    "Wireless Debugging refused port $firstPort, and rediscovery failed: ${rediscovery.message}",
+                    first,
+                )
+            }
+            return try {
+                AdbClient.connectTls(ADB_HOST, port, keys, identity)
+            } catch (second: ConnectException) {
+                throw IllegalStateException(
+                    "Wireless Debugging refused port $firstPort and the refreshed port $port: ${second.message}",
+                    second,
+                )
+            }
         }
     }
 
@@ -1288,8 +1331,8 @@ class MainActivity : Activity() {
 
                     override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                         resolving = false
-                        val address = serviceInfo.host?.hostAddress?.substringBefore('%')
-                        if (serviceInfo.port in 1..65535 && address in localAddresses()) {
+                        val localAddress = serviceInfo.host?.hostAddress?.substringBefore('%')
+                        if (serviceInfo.port in 1..65535 && localAddress in localAddresses()) {
                             cleanup()
                             if (continuation.isActive) continuation.resume(serviceInfo.port)
                         } else {
