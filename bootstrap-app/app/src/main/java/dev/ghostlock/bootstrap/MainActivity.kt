@@ -207,9 +207,9 @@ class MainActivity : Activity() {
             setBackgroundColor(0xff5f6368.toInt())
         }
         column.addView(statusBanner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        reconnectStatusButton = addButton(column, "RECONNECT & CHECK STATUS") {
+        reconnectStatusButton = addButton(column, "OPEN WIRELESS DEBUGGING SETTINGS") {
             connectPortInput.text.clear()
-            refreshExploitStatus()
+            startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
         }.also { it.visibility = ViewGroup.GONE }
 
         val tabStrip = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -543,7 +543,7 @@ class MainActivity : Activity() {
             } finally {
                 statusCheckRunning = false
                 if (::reconnectStatusButton.isInitialized) {
-                    reconnectStatusButton.text = "RECONNECT & CHECK STATUS"
+                    reconnectStatusButton.text = "OPEN WIRELESS DEBUGGING SETTINGS"
                     reconnectStatusButton.isEnabled = !busy
                 }
             }

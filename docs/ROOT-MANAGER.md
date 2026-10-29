@@ -95,9 +95,10 @@ custom su behavior.
 The Exploit tab's banner is checked through the app's Wireless Debugging ADB
 connection. If that connection is unavailable, the banner says **ROOT STATUS
 UNKNOWN**; it does not infer that root stopped. A USB ADB session on the host
-does not update the in-app status check. **Reconnect & check status** clears a
-stale connect-port override, rediscovers the Wireless Debugging port, and
-retries the check without triggering the exploit.
+does not update the in-app status check. **Open Wireless Debugging Settings**
+clears a stale connect-port override and opens Developer options. Returning to
+GhostSlop retries Wireless Debugging discovery and the status check without
+triggering the exploit.
 
 ## Confirmed behavior and open compatibility issue
 
