@@ -92,6 +92,11 @@ backend of another root app. **Check manager status** reports service, grant,
 and overlay state, but cannot establish that a specific app understands this
 custom su behavior.
 
+The Exploit tab's banner is checked through the app's Wireless Debugging ADB
+connection. If that connection is unavailable, the banner says **ROOT STATUS
+UNKNOWN**; it does not infer that root stopped. A USB ADB session on the host
+does not update the in-app status check.
+
 ## Confirmed behavior and open compatibility issue
 
 On `SM-A156U`, Android 16 build

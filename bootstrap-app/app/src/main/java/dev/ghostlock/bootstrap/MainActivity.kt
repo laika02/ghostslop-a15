@@ -521,10 +521,12 @@ class MainActivity : Activity() {
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                setPairedUi(false)
-                setExploitStatus(false)
-                setManagerPrepared(false)
-                setExploitPayloadStaged(false, false)
+                val pairingSaved = !guid.isNullOrBlank()
+                setPairedUi(pairingSaved)
+                if (pairingSaved) {
+                    pairedStatus.text = "Wireless Debugging identity is saved, but status could not be checked. Enable Wireless Debugging and reconnect."
+                }
+                setExploitStatus(null)
             } finally {
                 statusCheckRunning = false
             }
@@ -567,7 +569,7 @@ class MainActivity : Activity() {
                 }
             }
             null -> {
-                statusBanner.text = "PAIR WIRELESS DEBUGGING TO CHECK"
+                statusBanner.text = "ROOT STATUS UNKNOWN"
                 statusBanner.setBackgroundColor(0xff5f6368.toInt())
             }
         }
