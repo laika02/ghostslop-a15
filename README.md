@@ -84,7 +84,9 @@ At a glance:
 2. In **Exploit**, tap **Check & stage exploit**. This validates the device and
    stages the files; it does not run the exploit.
 3. Tap **Trigger exploit once** only if you intend to run the one-shot attempt.
-   The app asks for confirmation and will not retry within the same boot.
+   The app asks for confirmation, then shows a prominent running banner and
+   spinner. Keep GhostSlop open and wait for root verification; it will not
+   retry within the same boot.
 4. When the banner says **EXPLOIT ACTIVE**, open **Root Manager** and tap
    **Prepare manager**.
 5. Tap **Choose apps & enable su**, select app UID groups, and apply. The app

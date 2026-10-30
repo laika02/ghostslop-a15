@@ -13,8 +13,8 @@ android {
         applicationId = "dev.ghostlock.bootstrap"
         minSdk = 30
         targetSdk = 35
-        versionCode = 31
-        versionName = "0.9.22"
+        versionCode = 32
+        versionName = "0.9.23"
     }
 
     compileOptions {

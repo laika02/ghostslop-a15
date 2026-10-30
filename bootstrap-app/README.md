@@ -75,7 +75,8 @@ In the **Exploit** tab:
    identity before copying hash-pinned files to `/data/local/tmp`.
 2. Confirm that the target checks passed. Staging does not run the exploit.
 3. Tap **Trigger exploit once** and confirm only when ready to attempt it. The
-   app streams the exploit output and verifies the resulting root shell.
+   app shows a running banner and spinner, streams exploit output, and verifies
+   the resulting root shell. Keep GhostSlop open and wait for the result.
 4. When successful, the top banner reads **EXPLOIT ACTIVE**. The app hides the
    staging and trigger controls for that boot.
 

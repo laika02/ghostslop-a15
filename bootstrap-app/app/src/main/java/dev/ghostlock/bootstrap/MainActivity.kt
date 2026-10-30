@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import io.github.rhythmcache.adb.AdbClient
@@ -139,7 +140,9 @@ class MainActivity : Activity() {
     private lateinit var output: TextView
     private lateinit var scrollView: ScrollView
     private lateinit var logScrollView: ScrollView
+    private lateinit var statusContainer: LinearLayout
     private lateinit var statusBanner: TextView
+    private lateinit var exploitProgressBar: ProgressBar
     private lateinit var exploitPanel: LinearLayout
     private lateinit var managerPanel: LinearLayout
     private lateinit var exploitTabButton: TextView
@@ -210,16 +213,29 @@ class MainActivity : Activity() {
             setPadding(0, dp(4), 0, dp(10))
         })
 
+        statusContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setBackgroundColor(0xff5f6368.toInt())
+        }
+        exploitProgressBar = ProgressBar(this).apply {
+            isIndeterminate = true
+            visibility = ViewGroup.GONE
+        }
+        statusContainer.addView(exploitProgressBar, LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+            marginEnd = dp(8)
+        })
         statusBanner = TextView(this).apply {
             text = "Checking exploit status…"
             textSize = 16f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setTextColor(0xffffffff.toInt())
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            setBackgroundColor(0xff5f6368.toInt())
+            setPadding(dp(4), dp(8), dp(4), dp(8))
         }
-        column.addView(statusBanner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        statusContainer.addView(statusBanner, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        column.addView(statusContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         reconnectStatusButton = addButton(column, "OPEN WIRELESS DEBUGGING SETTINGS") {
             connectPortInput.text.clear()
             startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
@@ -426,6 +442,11 @@ class MainActivity : Activity() {
         if (busy) return
         val inputs = currentInputs()
         setBusy(true)
+        if (label == "One-shot trigger") {
+            showExploitWaitState(
+                "PREPARING EXPLOIT — PLEASE WAIT\nKeep GhostSlop open until the attempt and verification finish.",
+            )
+        }
         append("$label…")
         scope.launch {
             try {
@@ -474,6 +495,7 @@ class MainActivity : Activity() {
         }
         statusCheckRunning = true
         statusBanner.text = "Checking exploit status…"
+        statusContainer.setBackgroundColor(0xff5f6368.toInt())
         if (::reconnectStatusButton.isInitialized &&
             reconnectStatusButton.visibility == ViewGroup.VISIBLE) {
             reconnectStatusButton.text = "CONNECTING…"
@@ -566,6 +588,7 @@ class MainActivity : Activity() {
     private fun setExploitStatus(active: Boolean?) {
         exploitStatusUnknown = active == null
         if (!::statusBanner.isInitialized) return
+        if (::exploitProgressBar.isInitialized) exploitProgressBar.visibility = ViewGroup.GONE
         if (::reconnectStatusButton.isInitialized) {
             val pairingSaved = getSharedPreferences("adb-pairing", MODE_PRIVATE)
                 .getString("device_guid", null).isNullOrBlank().not()
@@ -575,7 +598,7 @@ class MainActivity : Activity() {
         when (active) {
             true -> {
                 statusBanner.text = "EXPLOIT ACTIVE"
-                statusBanner.setBackgroundColor(0xff188038.toInt())
+                statusContainer.setBackgroundColor(0xff188038.toInt())
                 if (::stageExploitButton.isInitialized) stageExploitButton.visibility = ViewGroup.GONE
                 if (::triggerExploitButton.isInitialized) triggerExploitButton.visibility = ViewGroup.GONE
                 if (::cleanStagedButton.isInitialized) cleanStagedButton.visibility = ViewGroup.GONE
@@ -586,7 +609,7 @@ class MainActivity : Activity() {
             }
             false -> {
                 statusBanner.text = "EXPLOIT NOT ACTIVE"
-                statusBanner.setBackgroundColor(0xffb3261e.toInt())
+                statusContainer.setBackgroundColor(0xffb3261e.toInt())
                 if (::stageExploitButton.isInitialized) {
                     stageExploitButton.visibility = if (exploitPayloadStaged) ViewGroup.GONE else ViewGroup.VISIBLE
                 }
@@ -607,9 +630,16 @@ class MainActivity : Activity() {
             }
             null -> {
                 statusBanner.text = "ROOT STATUS UNKNOWN"
-                statusBanner.setBackgroundColor(0xff5f6368.toInt())
+                statusContainer.setBackgroundColor(0xff5f6368.toInt())
             }
         }
+    }
+
+    private fun showExploitWaitState(message: String) {
+        if (!::statusBanner.isInitialized) return
+        statusBanner.text = message
+        statusContainer.setBackgroundColor(0xffb06000.toInt())
+        exploitProgressBar.visibility = ViewGroup.VISIBLE
     }
 
     private fun startStatusPolling() {
@@ -773,6 +803,9 @@ class MainActivity : Activity() {
         val markerResult = commandAllowFailure(client, "mkdir '$marker'")
         require(markerResult.exitCode == 0) { "This boot was already marked attempted (or the marker could not be created). Refusing to retry." }
         withContext(Dispatchers.Main) {
+            showExploitWaitState(
+                "EXPLOIT RUNNING — PLEASE WAIT\nKeep GhostSlop open. Do not retry; the app will verify when it finishes.",
+            )
             triggerExploitButton.visibility = ViewGroup.GONE
             stageExploitButton.visibility = ViewGroup.GONE
             exploitStageStatus.text = "Exploit attempt used for this boot. The app will not retry it."
